@@ -4,7 +4,6 @@
  * для nice!nano v2 (nRF52840)
  * ═══════════════════════════════════════════════════════════
  *
- * ФИНАЛЬНАЯ ВЕРСИЯ с проверенной распиновкой
  *
  * СХЕМА ПОДКЛЮЧЕНИЯ:
  * ┌──────────────┬────────────┬──────────────────────┐
@@ -67,9 +66,16 @@ const unsigned long debounceDelay = 50;
 
 // Потенциометр
 int lastVolumeValue = 0;
-int currentVolumeLevel = 50; // 0-100
+int currentVolumeLevel = 50; // 0-100 (шаги Windows)
 unsigned long lastVolumeChange = 0;
-const unsigned long volumeChangeDelay = 100; // Задержка между изменениями громкости
+const unsigned long volumeChangeDelay = 50; // Уменьшена задержка для более быстрого отклика
+
+// Настройки калибровки громкости
+const int VOLUME_STEPS = 50;        // Количество шагов громкости в Windows (обычно 50)
+const int ADC_MIN = 0;              // Минимальное значение АЦП (откалибровано)
+const int ADC_MAX = 954;            // Максимальное значение АЦП (откалибровано)
+const int NOISE_THRESHOLD = 15;     // Порог шума АЦП
+const int STEP_THRESHOLD = 2;       // Минимальное изменение в шагах для отправки команды
 
 // ═══════════════════════════════════════════════════════════
 // HID КОДЫ
@@ -143,6 +149,7 @@ void setup() {
   } else {
     Serial.println("USB не смонтирован, но продолжаем...");
   }
+
   Serial.println("Инициализация кнопок:");
   Serial.println("─────────────────────────────────────────────────────────");
   for (int i = 0; i < numButtons; i++) {
@@ -163,30 +170,20 @@ void setup() {
   Serial.print(PIN_VOLUME);
   Serial.println(" → ГРОМКОСТЬ (ADC)");
 
-  // Читаем начальное значение
-  lastVolumeValue = analogRead(PIN_VOLUME);
-  currentVolumeLevel = map(lastVolumeValue, 0, 940, 0, 100);
-  Serial.print("  Начальная громкость: ");
-  Serial.print(currentVolumeLevel);
-  Serial.println("%");
-  Serial.println("─────────────────────────────────────────────────────────\n");
-
-  // Инициализация USB HID
-  Serial.println("🔌 Инициализация USB HID...");
-  usb_hid.setPollInterval(2);
-  usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
-  usb_hid.begin();
-  
-  while (!TinyUSBDevice.mounted()) {
-    delay(1);
+  // Читаем начальное значение несколько раз для стабилизации
+  int sum = 0;
+  for (int i = 0; i < 10; i++) {
+    sum += analogRead(PIN_VOLUME);
+    delay(10);
   }
-  
-  Serial.println("╔════════════════════════════════════════════════════════╗");
-  Serial.println("║  МИКРОПАД ГОТОВ К РАБОТЕ!                              ║");
-  Serial.println("║                                                        ║");
-  Serial.println("║  Управление: стрелки + пробел                          ║");
-  Serial.println("║  Громкость: вращайте потенциометр                      ║");
-  Serial.println("╚════════════════════════════════════════════════════════╝\n");
+  lastVolumeValue = sum / 10;
+  currentVolumeLevel = map(lastVolumeValue, ADC_MIN, ADC_MAX, 0, VOLUME_STEPS);
+  Serial.print("Начальное значение АЦП:");
+  Serial.println(lastVolumeValue);
+  Serial.print("Начальный уровень:");
+  Serial.print(currentVolumeLevel);
+  Serial.print(" / ");
+  Serial.println(VOLUME_STEPS);
 
   delay(100);
 }
@@ -201,6 +198,7 @@ void loop() {
     delay(100);
     return;
   }
+
   // Обработка кнопок
   handleButtons();
 
@@ -283,33 +281,60 @@ void handleVolume() {
 
   // Сглаживание: игнорируем маленькие изменения (шум)
   int diff = abs(rawValue - lastVolumeValue);
-  if (diff < 10) {
+  if (diff < NOISE_THRESHOLD) {
     return; // Слишком маленькое изменение, игнорируем
   }
 
-  // Преобразуем в уровень 0-100
-  int newLevel = map(rawValue, 0, 1023, 0, 100);
+  // Преобразуем текущее и новое значение в шаги Windows
+  int oldLevel = currentVolumeLevel;
+  int newLevel = map(rawValue, ADC_MIN, ADC_MAX, 0, VOLUME_STEPS);
 
-  // Определяем направление изменения
-  if (newLevel > currentVolumeLevel + 2) {
-    // Увеличение громкости
-    sendVolumeUp();
-    currentVolumeLevel = newLevel;
+  // Ограничиваем диапазон
+  newLevel = constrain(newLevel, 0, VOLUME_STEPS);
 
-    Serial.print("Громкость ВВЕРХ →");
-    Serial.print(currentVolumeLevel);
-    Serial.println("%");
+  // Вычисляем разницу в шагах
+  int stepDiff = newLevel - oldLevel;
 
-  } else if (newLevel < currentVolumeLevel - 2) {
-    // Уменьшение громкости
-    sendVolumeDown();
-    currentVolumeLevel = newLevel;
-
-    Serial.print("Громкость ВНИЗ →");
-    Serial.print(currentVolumeLevel);
-    Serial.println("%");
+  // Если изменение слишком маленькое, игнорируем
+  if (abs(stepDiff) < STEP_THRESHOLD) {
+    return;
   }
 
+  // Определяем направление и количество шагов
+  if (stepDiff > 0) {
+    // Увеличение громкости - отправляем несколько команд VOLUME_UP
+    Serial.print("🔊 Громкость ВВЕРХ: ");
+    Serial.print(oldLevel);
+    Serial.print(" → ");
+    Serial.print(newLevel);
+    Serial.print(" (+");
+    Serial.print(stepDiff);
+    Serial.println(" шагов)");
+
+    for (int i = 0; i < stepDiff; i++) {
+      sendVolumeUp();
+      delay(15); // Небольшая задержка между командами
+    }
+
+  } else if (stepDiff < 0) {
+    // Уменьшение громкости - отправляем несколько команд VOLUME_DOWN
+    int absStepDiff = abs(stepDiff);
+    Serial.print("🔉 Громкость ВНИЗ: ");
+    Serial.print(oldLevel);
+    Serial.print(" → ");
+    Serial.print(newLevel);
+    Serial.print(" (-");
+    Serial.print(absStepDiff);
+    Serial.println(" шагов)");
+
+    for (int i = 0; i < absStepDiff; i++) {
+      sendVolumeDown();
+      delay(15); // Небольшая задержка между командами
+    }
+  }
+
+  // Обновляем текущий уровень и последнее значение
+  currentVolumeLevel = newLevel;
   lastVolumeValue = rawValue;
   lastVolumeChange = millis();
 }
@@ -317,7 +342,7 @@ void handleVolume() {
 void sendVolumeUp() {
   uint16_t volumeCmd = VOLUME_UP;
   usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
-  delay(10);
+  delay(5);
 
   // Отправляем "отпускание"
   volumeCmd = 0;
@@ -327,65 +352,9 @@ void sendVolumeUp() {
 void sendVolumeDown() {
   uint16_t volumeCmd = VOLUME_DOWN;
   usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
-  delay(10);
+  delay(5);
 
   // Отправляем "отпускание"
   volumeCmd = 0;
   usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
 }
-
-/*
- * ═══════════════════════════════════════════════════════════
- * СХЕМА ПОДКЛЮЧЕНИЯ
- * ═══════════════════════════════════════════════════════════
- *
- * КНОПКИ (между пином и GND):
- * ┌────────────┬────────────┬──────────┬──────────────┐
- * │ Функция    │ Пин на     │ Arduino  │ pinMode()    │
- * │            │ плате      │ D        │              │
- * ├────────────┼────────────┼──────────┼──────────────┤
- * │ ВВЕРХ ↑    │ 115        │ D18      │ 3            │
- * │ ВНИЗ ↓     │ 017        │ D2       │ 29           │
- * │ ВЛЕВО ←    │ 002        │ D19      │ 18           │
- * │ ВПРАВО →   │ 031        │ D21      │ 21           │
- * │ ПАУЗА      │ 011        │ D7       │ 23           │
- * └────────────┴────────────┴──────────┴──────────────┘
- * 
- * ПОТЕНЦИОМЕТР 10кОм:
- * ┌──────────────┬──────────────────────┐
- * │ Пин потенц.  │ Подключение          │
- * ├──────────────┼──────────────────────┤
- * │ Крайний 1    │ VCC (3.3V)           │
- * │ Средний      │ D20 (пин 029)        │
- * │ Крайний 2    │ GND                  │
- * └──────────────┴──────────────────────┘
- * 
- *     Потенциометр 10кОм
- *     ┌─────────────┐
- *     │             │
- *     │      ┌──┐   │
- *  1──┤─────►│  │   │
- *     │      └──┘   │
- *  2──┤─────────────┤
- *     │             │
- *  3──┤─────────────┤
- *     │             │
- *     └─────────────┘
- *     
- *  Пин 1 → VCC (3.3V)
- *  Пин 2 → D20 (029) на плате
- *  Пин 3 → GND
- *
- * ═══════════════════════════════════════════════════════════
- * КАК ИСПОЛЬЗОВАТЬ:
- * ═══════════════════════════════════════════════════════════
- *
- * 1. Загрузите этот скетч на nice!nano
- * 2. ВАЖНО: Закройте Serial Monitor
- * 3. Отключите nice!nano от USB
- * 4. Подключите снова
- * 5. Windows должна распознать устройство как "HID Keyboard"
- * 6. Теперь можете открыть Serial Monitor для отладки
- *
- * ═══════════════════════════════════════════════════════════
- */
