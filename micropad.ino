@@ -3,9 +3,9 @@
  * МИКРОПАД НА 5 КНОПОК + ПОТЕНЦИОМЕТР ГРОМКОСТИ
  * для nice!nano v2 (nRF52840)
  * ═══════════════════════════════════════════════════════════
- * 
+ *
  * ФИНАЛЬНАЯ ВЕРСИЯ с проверенной распиновкой
- * 
+ *
  * СХЕМА ПОДКЛЮЧЕНИЯ:
  * ┌──────────────┬────────────┬──────────────────────┐
  * │ Функция      │ Пин на     │ Arduino D │ Порт     │
@@ -18,7 +18,7 @@
  * │ ПАУЗА        │ 011        │ D7        │ P0.11    │
  * │ ГРОМКОСТЬ    │ 029        │ D20       │ P0.29    │
  * └──────────────┴────────────┴──────────────────────┘
- * 
+ *
  * Кнопки: между пином и GND
  * Потенциометр 10кОм: VCC → средний пин → D20 (029) → GND
  */
@@ -101,13 +101,48 @@ KeyReport keyReport = {0};
 
 void setup() {
   Serial.begin(115200);
-  
+
+  // ═══════════════════════════════════════════════════════════
+  // КРИТИЧЕСКИ ВАЖНО: Инициализация TinyUSB ПЕРЕД всем остальным
+  // ═══════════════════════════════════════════════════════════
+
+  // Проверяем, инициализирован ли TinyUSB Device
+  if (!TinyUSBDevice.isInitialized()) {
+    TinyUSBDevice.begin(0);
+  }
+
+  // Настраиваем USB HID
+  usb_hid.setPollInterval(2);
+  usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
+  usb_hid.begin();
+
+  // ВАЖНО: Если устройство уже смонтировано, переподключаем для перезагрузки HID
+  if (TinyUSBDevice.mounted()) {
+    TinyUSBDevice.detach();
+    delay(10);
+    TinyUSBDevice.attach();
+  }
+
+  // Ждём подключения Serial (но не дольше 3 секунд)
   unsigned long startTime = millis();
   while (!Serial && (millis() - startTime < 3000)) {
     delay(10);
   }
-  
 
+  // Ждём монтирования USB устройства
+  Serial.println("\nОжидание подключения USB...");
+  startTime = millis();
+  while (!TinyUSBDevice.mounted() && (millis() - startTime < 5000)) {
+    delay(100);
+    Serial.print(".");
+  }
+  Serial.println();
+
+  if (TinyUSBDevice.mounted()) {
+    Serial.println("USB устройство смонтировано!");
+  } else {
+    Serial.println("USB не смонтирован, но продолжаем...");
+  }
   Serial.println("Инициализация кнопок:");
   Serial.println("─────────────────────────────────────────────────────────");
   for (int i = 0; i < numButtons; i++) {
@@ -119,7 +154,7 @@ void setup() {
     Serial.println(buttonNames[i]);
   }
   Serial.println("─────────────────────────────────────────────────────────\n");
-  
+
   // Инициализация потенциометра
   Serial.println("Инициализация потенциометра:");
   Serial.println("─────────────────────────────────────────────────────────");
@@ -127,16 +162,15 @@ void setup() {
   Serial.print("  ✓ D");
   Serial.print(PIN_VOLUME);
   Serial.println(" → ГРОМКОСТЬ (ADC)");
-  
+
   // Читаем начальное значение
   lastVolumeValue = analogRead(PIN_VOLUME);
-  currentVolumeLevel = map(lastVolumeValue, 0, 1023, 0, 100);
-  currentVolumeLevel = constrain(currentVolumeLevel, 0, 100);
+  currentVolumeLevel = map(lastVolumeValue, 0, 940, 0, 100);
   Serial.print("  Начальная громкость: ");
   Serial.print(currentVolumeLevel);
   Serial.println("%");
   Serial.println("─────────────────────────────────────────────────────────\n");
-  
+
   // Инициализация USB HID
   Serial.println("🔌 Инициализация USB HID...");
   usb_hid.setPollInterval(2);
@@ -153,7 +187,7 @@ void setup() {
   Serial.println("║  Управление: стрелки + пробел                          ║");
   Serial.println("║  Громкость: вращайте потенциометр                      ║");
   Serial.println("╚════════════════════════════════════════════════════════╝\n");
-  
+
   delay(100);
 }
 
@@ -162,12 +196,17 @@ void setup() {
 // ═══════════════════════════════════════════════════════════
 
 void loop() {
+  // Проверяем, что USB смонтирован
+  if (!TinyUSBDevice.mounted()) {
+    delay(100);
+    return;
+  }
   // Обработка кнопок
   handleButtons();
-  
+
   // Обработка потенциометра
   handleVolume();
-  
+
   delay(5);
 }
 
@@ -178,15 +217,15 @@ void loop() {
 void handleButtons() {
   for (int i = 0; i < numButtons; i++) {
     int reading = digitalRead(buttonPins[i]);
-    
+
     if (reading != lastButtonStates[i]) {
       lastDebounceTime[i] = millis();
     }
-    
+
     if ((millis() - lastDebounceTime[i]) > debounceDelay) {
       if (reading != buttonStates[i]) {
         buttonStates[i] = reading;
-        
+
         if (buttonStates[i] == LOW) {
           handleButtonPress(i);
         } else {
@@ -194,7 +233,7 @@ void handleButtons() {
         }
       }
     }
-    
+
     lastButtonStates[i] = reading;
   }
 }
@@ -202,10 +241,10 @@ void handleButtons() {
 void handleButtonPress(int buttonIndex) {
   Serial.print("🔴");
   Serial.print(buttonNames[buttonIndex]);
-  Serial.print(" → ");
-  
+  Serial.print("→");
+
   uint8_t keycode = 0;
-  
+
   switch(buttonIndex) {
     case 0: keycode = KEY_ARROW_UP; Serial.println("↑"); break;
     case 1: keycode = KEY_ARROW_DOWN; Serial.println("↓"); break;
@@ -213,22 +252,20 @@ void handleButtonPress(int buttonIndex) {
     case 3: keycode = KEY_ARROW_RIGHT; Serial.println("→"); break;
     case 4: keycode = KEY_SPACEBAR; Serial.println("SPACE"); break;
   }
-  
-  if (TinyUSBDevice.mounted()) {
-    keyReport.keys[0] = keycode;
-    usb_hid.sendReport(1, &keyReport, sizeof(keyReport));
-  }
+
+  // Отправляем нажатие клавиши
+  keyReport.keys[0] = keycode;
+  usb_hid.sendReport(1, &keyReport, sizeof(keyReport));
 }
 
 void handleButtonRelease(int buttonIndex) {
   Serial.print("⚪");
   Serial.print(buttonNames[buttonIndex]);
   Serial.println(" - отпущена");
-  
-  if (TinyUSBDevice.mounted()) {
-    keyReport.keys[0] = 0;
-    usb_hid.sendReport(1, &keyReport, sizeof(keyReport));
-  }
+
+  // Отправляем отпускание клавиши
+  keyReport.keys[0] = 0;
+  usb_hid.sendReport(1, &keyReport, sizeof(keyReport));
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -240,64 +277,58 @@ void handleVolume() {
   if (millis() - lastVolumeChange < volumeChangeDelay) {
     return;
   }
-  
+
   // Читаем значение потенциометра
   int rawValue = analogRead(PIN_VOLUME);
-  
+
   // Сглаживание: игнорируем маленькие изменения (шум)
   int diff = abs(rawValue - lastVolumeValue);
   if (diff < 10) {
     return; // Слишком маленькое изменение, игнорируем
   }
-  
 
+  // Преобразуем в уровень 0-100
   int newLevel = map(rawValue, 0, 1023, 0, 100);
-  // Ограничиваем диапазон 0-100
-  newLevel = constrain(newLevel, 0, 100);
-  
+
   // Определяем направление изменения
   if (newLevel > currentVolumeLevel + 2) {
     // Увеличение громкости
     sendVolumeUp();
     currentVolumeLevel = newLevel;
-    
-    Serial.print("🔊 Громкость ВВЕРХ → ");
+
+    Serial.print("Громкость ВВЕРХ →");
     Serial.print(currentVolumeLevel);
     Serial.println("%");
-    
+
   } else if (newLevel < currentVolumeLevel - 2) {
     // Уменьшение громкости
     sendVolumeDown();
     currentVolumeLevel = newLevel;
-    
-    Serial.print("🔉 Громкость ВНИЗ → ");
+
+    Serial.print("Громкость ВНИЗ →");
     Serial.print(currentVolumeLevel);
     Serial.println("%");
   }
-  
+
   lastVolumeValue = rawValue;
   lastVolumeChange = millis();
 }
 
 void sendVolumeUp() {
-  if (!TinyUSBDevice.mounted()) return;
-  
   uint16_t volumeCmd = VOLUME_UP;
   usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
   delay(10);
-  
+
   // Отправляем "отпускание"
   volumeCmd = 0;
   usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
 }
 
 void sendVolumeDown() {
-  if (!TinyUSBDevice.mounted()) return;
-  
   uint16_t volumeCmd = VOLUME_DOWN;
   usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
   delay(10);
-  
+
   // Отправляем "отпускание"
   volumeCmd = 0;
   usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
@@ -307,7 +338,7 @@ void sendVolumeDown() {
  * ═══════════════════════════════════════════════════════════
  * СХЕМА ПОДКЛЮЧЕНИЯ
  * ═══════════════════════════════════════════════════════════
- * 
+ *
  * КНОПКИ (между пином и GND):
  * ┌────────────┬────────────┬──────────┬──────────────┐
  * │ Функция    │ Пин на     │ Arduino  │ pinMode()    │
@@ -344,44 +375,17 @@ void sendVolumeDown() {
  *  Пин 1 → VCC (3.3V)
  *  Пин 2 → D20 (029) на плате
  *  Пин 3 → GND
- * 
+ *
  * ═══════════════════════════════════════════════════════════
- * ТЕСТИРОВАНИЕ
+ * КАК ИСПОЛЬЗОВАТЬ:
  * ═══════════════════════════════════════════════════════════
- * 
- * 1. ПРОВЕРКА КНОПОК:
- *    - Откройте Serial Monitor (115200 baud)
- *    - Нажимайте кнопки - должны появляться сообщения
- *    - В текстовом редакторе проверьте стрелки и пробел
- * 
- * 2. ПРОВЕРКА ГРОМКОСТИ:
- *    - Откройте любой плеер/браузер с видео
- *    - Вращайте потенциометр
- *    - Громкость системы должна меняться
- *    - В Serial Monitor смотрите процент громкости
- * 
- * ═══════════════════════════════════════════════════════════
- * НАСТРОЙКИ
- * ═══════════════════════════════════════════════════════════
- * 
- * ЧУВСТВИТЕЛЬНОСТЬ ПОТЕНЦИОМЕТРА:
- * - Если громкость меняется слишком быстро:
- *   увеличьте volumeChangeDelay со 100 до 200
- * 
- * - Если громкость меняется слишком медленно:
- *   уменьшите volumeChangeDelay со 100 до 50
- * 
- * - Если много ложных срабатываний:
- *   увеличьте порог в handleVolume() с 10 до 20
- * 
- * ИЗМЕНИТЬ НАЗНАЧЕНИЕ КНОПОК:
- * - Измените константы KEY_* на нужные HID коды
- * 
- * ДОБАВИТЬ ДРУГИЕ МЕДИА-КЛАВИШИ:
- * - HID_USAGE_CONSUMER_PLAY_PAUSE (воспроизведение/пауза)
- * - HID_USAGE_CONSUMER_SCAN_NEXT (следующий трек)
- * - HID_USAGE_CONSUMER_SCAN_PREVIOUS (предыдущий трек)
- * - HID_USAGE_CONSUMER_MUTE (выключить звук)
- * 
+ *
+ * 1. Загрузите этот скетч на nice!nano
+ * 2. ВАЖНО: Закройте Serial Monitor
+ * 3. Отключите nice!nano от USB
+ * 4. Подключите снова
+ * 5. Windows должна распознать устройство как "HID Keyboard"
+ * 6. Теперь можете открыть Serial Monitor для отладки
+ *
  * ═══════════════════════════════════════════════════════════
  */
