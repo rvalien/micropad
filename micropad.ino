@@ -6,20 +6,19 @@
  *
  *
  * СХЕМА ПОДКЛЮЧЕНИЯ:
- * ┌──────────────┬────────────┬──────────────────────┐
- * │ Функция      │ Пин на     │ Arduino D │ Порт     │
- * │              │ плате      │           │          │
- * ├──────────────┼────────────┼──────────────────────┤
- * │ ВВЕРХ ↑      │ 115        │ D18       │ P1.15    │
- * │ ВНИЗ ↓       │ 017        │ D2        │ P0.17    │
- * │ ВЛЕВО ←      │ 002        │ D19       │ P0.02    │
- * │ ВПРАВО →     │ 031        │ D21       │ P0.31    │
- * │ ПАУЗА        │ 011        │ D7        │ P0.11    │
- * │ ГРОМКОСТЬ    │ 029        │ D20       │ P0.29    │
- * └──────────────┴────────────┴──────────────────────┘
+ * ┌──────────────┬────────────┬───────────────────────────┐
+ * │ Функция      │ Arduino D  │ Физический пин на плате   │
+ * ├──────────────┼────────────┼───────────────────────────┤
+ * │ ВВЕРХ ↑      │ D18        │ P115 (P1.15)              │
+ * │ ВНИЗ ↓       │ D2         │ P017 (P0.17)              │
+ * │ ВЛЕВО ←      │ D19        │ P002 (P0.02)              │
+ * │ ВПРАВО →     │ D21        │ P031 (P0.31)              │
+ * │ ПАУЗА        │ D7         │ P011 (P0.11)              │
+ * │ ГРОМКОСТЬ    │ D20        │ P029 (P0.29) / A5         │
+ * └──────────────┴────────────┴───────────────────────────┘
  *
- * Кнопки: между пином и GND
- * Потенциометр 10кОм: VCC → средний пин → D20 (029) → GND
+ * Кнопки: между пином и GND (с подтяжкой INPUT_PULLUP)
+ * Потенциометр 10кОм: VCC → средний пин → D20 (A5) → GND
  */
 
 #include <Adafruit_TinyUSB.h>
@@ -41,41 +40,56 @@ uint8_t const desc_hid_report[] = {
 // ═══════════════════════════════════════════════════════════
 
 // Кнопки
-const int PIN_UP    = 3;   // D18 (пин 115 на плате)
-const int PIN_DOWN  = 29;  // D2  (пин 017 на плате)
-const int PIN_LEFT  = 18;  // D19 (пин 002 на плате)
-const int PIN_RIGHT = 21;  // D21 (пин 031 на плате)
-const int PIN_PAUSE = 23;  // D7  (пин 011 на плате)
+const int PIN_UP    = 3;   // D18 (пин P115 на плате)
+const int PIN_DOWN  = 29;  // D2  (пин P017 на плате)
+const int PIN_LEFT  = 18;  // D19 (пин P002 на плате)
+const int PIN_RIGHT = 21;  // D21 (пин P031 на плате)
+const int PIN_PAUSE = 23;  // D7  (пин P011 на плате)
 
 // Потенциометр
-const int PIN_VOLUME = 20; // D20 (пин 029 на плате) - ADC
+const int PIN_VOLUME = 20; // D20 (пин P029 на плате) - ADC/A5
 
 const int buttonPins[] = {PIN_UP, PIN_DOWN, PIN_LEFT, PIN_RIGHT, PIN_PAUSE};
 const char* buttonNames[] = {"ВВЕРХ ↑", "ВНИЗ ↓", "ВЛЕВО ←", "ВПРАВО →", "ПАУЗА ⏸"};
 const int numButtons = 5;
 
 // ═══════════════════════════════════════════════════════════
-// СОСТОЯНИЯ
+// СОСТОЯНИЯ КНОПОК
 // ═══════════════════════════════════════════════════════════
 
-// Кнопки
 bool buttonStates[numButtons] = {false};
 bool lastButtonStates[numButtons] = {false};
 unsigned long lastDebounceTime[numButtons] = {0};
 const unsigned long debounceDelay = 50;
 
-// Потенциометр
-int lastVolumeValue = 0;
-int currentVolumeLevel = 50; // 0-100 (шаги Windows)
-unsigned long lastVolumeChange = 0;
-const unsigned long volumeChangeDelay = 50; // Уменьшена задержка для более быстрого отклика
+// ═══════════════════════════════════════════════════════════
+// СОСТОЯНИЯ ГРОМКОСТИ
+// ═══════════════════════════════════════════════════════════
+
+// Экспоненциальное сглаживание
+float smoothedVolume = 0;
+const float ALPHA = 0.25; // Коэффициент сглаживания (0-1), меньше = плавнее
+
+// Текущий уровень громкости
+int currentVolumeLevel = 50; // 0-100 (уровни Windows)
+
+// Неблокирующая отправка команд громкости
+int pendingVolumeSteps = 0; // Количество оставшихся команд для отправки
+bool volumeIncreasing = true; // Направление изменения
+unsigned long lastVolumeCommandTime = 0;
+const unsigned long volumeCommandDelay = 20; // Задержка между командами громкости (мс)
+
+// Проверка изменения громкости
+unsigned long lastVolumeCheckTime = 0;
+const unsigned long volumeCheckDelay = 30; // Частота проверки потенциометра (мс)
 
 // Настройки калибровки громкости
-const int VOLUME_STEPS = 50;        // Количество шагов громкости в Windows (обычно 50)
+const int VOLUME_STEPS = 100;       // Количество уровней громкости 0-100% (Windows использует 0-100)
 const int ADC_MIN = 0;              // Минимальное значение АЦП (откалибровано)
-const int ADC_MAX = 954;            // Максимальное значение АЦП (откалибровано)
+const int ADC_MAX = 1023;           // Максимальное значение АЦП (полный диапазон 10-бит АЦП)
 const int NOISE_THRESHOLD = 15;     // Порог шума АЦП
-const int STEP_THRESHOLD = 2;       // Минимальное изменение в шагах для отправки команды
+const int STEP_THRESHOLD = 1;       // Минимальное изменение в уровнях для отправки команды
+const int MAX_STEPS_PER_UPDATE = 10; // Максимум шагов за одно обновление
 
 // ═══════════════════════════════════════════════════════════
 // HID КОДЫ
@@ -136,7 +150,11 @@ void setup() {
   }
 
   // Ждём монтирования USB устройства
-  Serial.println("\nОжидание подключения USB...");
+  Serial.println("\n╔═══════════════════════════════════════════════════════════╗");
+  Serial.println("║       МИКРОПАД НА 5 КНОПОК + ПОТЕНЦИОМЕТР ГРОМКОСТИ      ║");
+  Serial.println("╚═══════════════════════════════════════════════════════════╝\n");
+
+  Serial.println("Ожидание подключения USB...");
   startTime = millis();
   while (!TinyUSBDevice.mounted() && (millis() - startTime < 5000)) {
     delay(100);
@@ -145,45 +163,61 @@ void setup() {
   Serial.println();
 
   if (TinyUSBDevice.mounted()) {
-    Serial.println("USB устройство смонтировано!");
+    Serial.println("✓ USB устройство смонтировано!");
   } else {
-    Serial.println("USB не смонтирован, но продолжаем...");
+    Serial.println("⚠ USB не смонтирован, но продолжаем...");
   }
 
-  Serial.println("Инициализация кнопок:");
-  Serial.println("─────────────────────────────────────────────────────────");
+  Serial.println("\n┌───────────────────────────────────────────────────────────┐");
+  Serial.println("│ Инициализация кнопок:                                     │");
+  Serial.println("├───────────────────────────────────────────────────────────┤");
   for (int i = 0; i < numButtons; i++) {
     pinMode(buttonPins[i], INPUT_PULLUP);
-    Serial.print("  ✓ D");
+    Serial.print("│  ✓ D");
     if (buttonPins[i] < 10) Serial.print(" ");
     Serial.print(buttonPins[i]);
     Serial.print(" → ");
-    Serial.println(buttonNames[i]);
+    Serial.print(buttonNames[i]);
+    // Добавляем пробелы для выравнивания
+    int spaces = 42 - strlen(buttonNames[i]);
+    for (int j = 0; j < spaces; j++) Serial.print(" ");
+    Serial.println("│");
   }
-  Serial.println("─────────────────────────────────────────────────────────\n");
+  Serial.println("└───────────────────────────────────────────────────────────┘\n");
 
   // Инициализация потенциометра
-  Serial.println("Инициализация потенциометра:");
-  Serial.println("─────────────────────────────────────────────────────────");
+  Serial.println("┌───────────────────────────────────────────────────────────┐");
+  Serial.println("│ Инициализация потенциометра:                              │");
+  Serial.println("├───────────────────────────────────────────────────────────┤");
   pinMode(PIN_VOLUME, INPUT);
-  Serial.print("  ✓ D");
+  Serial.print("│  ✓ D");
   Serial.print(PIN_VOLUME);
-  Serial.println(" → ГРОМКОСТЬ (ADC)");
+  Serial.println(" → ГРОМКОСТЬ (ADC)                                │");
 
   // Читаем начальное значение несколько раз для стабилизации
   int sum = 0;
-  for (int i = 0; i < 10; i++) {
+  for (int i = 0; i < 20; i++) {
     sum += analogRead(PIN_VOLUME);
-    delay(10);
+    delay(5);
   }
-  lastVolumeValue = sum / 10;
-  currentVolumeLevel = map(lastVolumeValue, ADC_MIN, ADC_MAX, 0, VOLUME_STEPS);
-  Serial.print("Начальное значение АЦП:");
-  Serial.println(lastVolumeValue);
-  Serial.print("Начальный уровень:");
+  int initialValue = sum / 20;
+  smoothedVolume = initialValue; // Инициализация сглаживания
+  currentVolumeLevel = map(initialValue, ADC_MIN, ADC_MAX, 0, VOLUME_STEPS);
+  currentVolumeLevel = constrain(currentVolumeLevel, 0, VOLUME_STEPS);
+
+  Serial.print("│  Начальное значение АЦП: ");
+  Serial.print(initialValue);
+  Serial.print("                                ");
+  Serial.println("│");
+  Serial.print("│  Начальный уровень: ");
   Serial.print(currentVolumeLevel);
   Serial.print(" / ");
-  Serial.println(VOLUME_STEPS);
+  Serial.print(VOLUME_STEPS);
+  Serial.print("                              ");
+  Serial.println("│");
+  Serial.println("└───────────────────────────────────────────────────────────┘\n");
+
+  Serial.println("🚀 Микропад готов к работе!\n");
 
   delay(100);
 }
@@ -199,13 +233,19 @@ void loop() {
     return;
   }
 
-  // Обработка кнопок
+  // Обработка кнопок (всегда работает без блокировки)
   handleButtons();
 
-  // Обработка потенциометра
-  handleVolume();
+  // Проверка изменения громкости (периодически)
+  if (millis() - lastVolumeCheckTime >= volumeCheckDelay) {
+    checkVolumeChange();
+    lastVolumeCheckTime = millis();
+  }
 
-  delay(5);
+  // Отправка очереди команд громкости (неблокирующая)
+  sendPendingVolumeCommands();
+
+  delay(1); // Минимальная задержка для стабильности
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -237,17 +277,19 @@ void handleButtons() {
 }
 
 void handleButtonPress(int buttonIndex) {
-  Serial.print("🔴");
+  Serial.print("[");
+  Serial.print(millis());
+  Serial.print("ms] 🔴 ");
   Serial.print(buttonNames[buttonIndex]);
-  Serial.print("→");
+  Serial.print(" → ");
 
   uint8_t keycode = 0;
 
   switch(buttonIndex) {
-    case 0: keycode = KEY_ARROW_UP; Serial.println("↑"); break;
-    case 1: keycode = KEY_ARROW_DOWN; Serial.println("↓"); break;
-    case 2: keycode = KEY_ARROW_LEFT; Serial.println("←"); break;
-    case 3: keycode = KEY_ARROW_RIGHT; Serial.println("→"); break;
+    case 0: keycode = KEY_ARROW_UP; Serial.println("↑");     break;
+    case 1: keycode = KEY_ARROW_DOWN; Serial.println("↓");   break;
+    case 2: keycode = KEY_ARROW_LEFT; Serial.println("←");   break;
+    case 3: keycode = KEY_ARROW_RIGHT; Serial.println("→");  break;
     case 4: keycode = KEY_SPACEBAR; Serial.println("SPACE"); break;
   }
 
@@ -257,7 +299,9 @@ void handleButtonPress(int buttonIndex) {
 }
 
 void handleButtonRelease(int buttonIndex) {
-  Serial.print("⚪");
+  Serial.print("[");
+  Serial.print(millis());
+  Serial.print("ms] ⚪ ");
   Serial.print(buttonNames[buttonIndex]);
   Serial.println(" - отпущена");
 
@@ -267,27 +311,25 @@ void handleButtonRelease(int buttonIndex) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// ОБРАБОТКА ГРОМКОСТИ
+// ОБРАБОТКА ГРОМКОСТИ (неблокирующая)
 // ═══════════════════════════════════════════════════════════
 
-void handleVolume() {
-  // Ограничиваем частоту проверки
-  if (millis() - lastVolumeChange < volumeChangeDelay) {
+void checkVolumeChange() {
+  // Если еще есть очередь команд, не проверяем новые изменения
+  if (pendingVolumeSteps > 0) {
     return;
   }
 
   // Читаем значение потенциометра
   int rawValue = analogRead(PIN_VOLUME);
 
-  // Сглаживание: игнорируем маленькие изменения (шум)
-  int diff = abs(rawValue - lastVolumeValue);
-  if (diff < NOISE_THRESHOLD) {
-    return; // Слишком маленькое изменение, игнорируем
-  }
+  // Экспоненциальное сглаживание
+  smoothedVolume = ALPHA * rawValue + (1 - ALPHA) * smoothedVolume;
+  int smoothedValue = (int)smoothedVolume;
 
-  // Преобразуем текущее и новое значение в шаги Windows
+  // Преобразуем в шаги Windows
   int oldLevel = currentVolumeLevel;
-  int newLevel = map(rawValue, ADC_MIN, ADC_MAX, 0, VOLUME_STEPS);
+  int newLevel = map(smoothedValue, ADC_MIN, ADC_MAX, 0, VOLUME_STEPS);
 
   // Ограничиваем диапазон
   newLevel = constrain(newLevel, 0, VOLUME_STEPS);
@@ -300,43 +342,62 @@ void handleVolume() {
     return;
   }
 
-  // Определяем направление и количество шагов
-  if (stepDiff > 0) {
-    // Увеличение громкости - отправляем несколько команд VOLUME_UP
+  // Ограничиваем максимальное изменение за раз
+  stepDiff = constrain(stepDiff, -MAX_STEPS_PER_UPDATE, MAX_STEPS_PER_UPDATE);
+
+  // Обновляем целевой уровень
+  int targetLevel = oldLevel + stepDiff;
+  targetLevel = constrain(targetLevel, 0, VOLUME_STEPS);
+
+  // Сохраняем количество шагов для отправки
+  pendingVolumeSteps = abs(stepDiff);
+  volumeIncreasing = (stepDiff > 0);
+
+  // Обновляем текущий уровень
+  currentVolumeLevel = targetLevel;
+
+  // Выводим информацию
+  Serial.print("[");
+  Serial.print(millis());
+  Serial.print("ms] ");
+  if (volumeIncreasing) {
     Serial.print("🔊 Громкость ВВЕРХ: ");
-    Serial.print(oldLevel);
-    Serial.print(" → ");
-    Serial.print(newLevel);
-    Serial.print(" (+");
-    Serial.print(stepDiff);
-    Serial.println(" шагов)");
-
-    for (int i = 0; i < stepDiff; i++) {
-      sendVolumeUp();
-      delay(15); // Небольшая задержка между командами
-    }
-
-  } else if (stepDiff < 0) {
-    // Уменьшение громкости - отправляем несколько команд VOLUME_DOWN
-    int absStepDiff = abs(stepDiff);
+  } else {
     Serial.print("🔉 Громкость ВНИЗ: ");
-    Serial.print(oldLevel);
-    Serial.print(" → ");
-    Serial.print(newLevel);
-    Serial.print(" (-");
-    Serial.print(absStepDiff);
-    Serial.println(" шагов)");
+  }
+  Serial.print(oldLevel);
+  Serial.print(" → ");
+  Serial.print(targetLevel);
+  Serial.print(" (");
+  if (volumeIncreasing) Serial.print("+");
+  else Serial.print("-");
+  Serial.print(abs(stepDiff));
+  Serial.print(" шагов, ADC=");
+  Serial.print(smoothedValue);
+  Serial.println(")");
+}
 
-    for (int i = 0; i < absStepDiff; i++) {
-      sendVolumeDown();
-      delay(15); // Небольшая задержка между командами
-    }
+void sendPendingVolumeCommands() {
+  // Если нет команд в очереди, выходим
+  if (pendingVolumeSteps <= 0) {
+    return;
   }
 
-  // Обновляем текущий уровень и последнее значение
-  currentVolumeLevel = newLevel;
-  lastVolumeValue = rawValue;
-  lastVolumeChange = millis();
+  // Проверяем, прошло ли достаточно времени с последней команды
+  if (millis() - lastVolumeCommandTime < volumeCommandDelay) {
+    return;
+  }
+
+  // Отправляем одну команду
+  if (volumeIncreasing) {
+    sendVolumeUp();
+  } else {
+    sendVolumeDown();
+  }
+
+  // Уменьшаем счетчик
+  pendingVolumeSteps--;
+  lastVolumeCommandTime = millis();
 }
 
 void sendVolumeUp() {
