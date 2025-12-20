@@ -2,8 +2,13 @@
  * ═══════════════════════════════════════════════════════════
  * МИКРОПАД НА 5 КНОПОК + ПОТЕНЦИОМЕТР ГРОМКОСТИ
  * для nice!nano v2 (nRF52840)
+ * ПОДДЕРЖКА: USB (проводное) + BLUETOOTH (беспроводное)
  * ═══════════════════════════════════════════════════════════
  *
+ * РЕЖИМЫ РАБОТЫ:
+ * - USB: Автоматически при подключении кабеля
+ * - Bluetooth: Автоматически при отключенном кабеле
+ * - Имя устройства BLE: "Micropad-5K"
  *
  * СХЕМА ПОДКЛЮЧЕНИЯ:
  * ┌──────────────┬────────────┬───────────────────────────┐
@@ -21,7 +26,21 @@
  * Потенциометр 10кОм: VCC → средний пин → D20 (A5) → GND
  */
 
+#include <bluefruit.h>
 #include <Adafruit_TinyUSB.h>
+
+// ═══════════════════════════════════════════════════════════
+// РЕЖИМ ПОДКЛЮЧЕНИЯ
+// ═══════════════════════════════════════════════════════════
+
+enum ConnectionMode {
+  MODE_USB,
+  MODE_BLUETOOTH,
+  MODE_NONE
+};
+
+ConnectionMode currentMode = MODE_NONE;
+bool wasUSBConnected = false;
 
 // ═══════════════════════════════════════════════════════════
 // USB HID НАСТРОЙКИ
@@ -34,6 +53,13 @@ uint8_t const desc_hid_report[] = {
   TUD_HID_REPORT_DESC_KEYBOARD(HID_REPORT_ID(1)),
   TUD_HID_REPORT_DESC_CONSUMER(HID_REPORT_ID(2))
 };
+
+// ═══════════════════════════════════════════════════════════
+// BLUETOOTH HID НАСТРОЙКИ
+// ═══════════════════════════════════════════════════════════
+
+BLEDis bledis;    // Device Information Service
+BLEHidAdafruit blehid;  // HID Service
 
 // ═══════════════════════════════════════════════════════════
 // РАСПИНОВКА
@@ -68,7 +94,7 @@ const unsigned long debounceDelay = 50;
 
 // Экспоненциальное сглаживание
 float smoothedVolume = 0;
-const float ALPHA = 0.25; // Коэффициент сглаживания (0-1), меньше = плавнее
+const float ALPHA = 0.15; // Коэффициент сглаживания (0-1), меньше = плавнее и стабильнее
 
 // Текущий уровень громкости
 int currentVolumeLevel = 50; // 0-100 (уровни Windows)
@@ -81,21 +107,21 @@ const unsigned long volumeCommandDelay = 20; // Задержка между ко
 
 // Проверка изменения громкости
 unsigned long lastVolumeCheckTime = 0;
-const unsigned long volumeCheckDelay = 30; // Частота проверки потенциометра (мс)
+const unsigned long volumeCheckDelay = 100; // Частота проверки потенциометра (увеличено для стабильности)
 
 // Настройки калибровки громкости
 const int VOLUME_STEPS = 100;       // Количество уровней громкости 0-100% (Windows использует 0-100)
 const int ADC_MIN = 0;              // Минимальное значение АЦП (откалибровано)
 const int ADC_MAX = 1023;           // Максимальное значение АЦП (полный диапазон 10-бит АЦП)
-const int NOISE_THRESHOLD = 15;     // Порог шума АЦП
-const int STEP_THRESHOLD = 1;       // Минимальное изменение в уровнях для отправки команды
+const int NOISE_THRESHOLD = 25;     // Порог шума АЦП (увеличено для стабильности)
+const int STEP_THRESHOLD = 3;       // Минимальное изменение в уровнях для отправки команды (увеличено!)
 const int MAX_STEPS_PER_UPDATE = 10; // Максимум шагов за одно обновление
 
 // ═══════════════════════════════════════════════════════════
 // HID КОДЫ
 // ═══════════════════════════════════════════════════════════
 
-// Клавиатурные коды
+// Клавиатурные коды (одинаковые для USB и Bluetooth)
 const uint8_t KEY_ARROW_UP    = 0x52;
 const uint8_t KEY_ARROW_DOWN  = 0x51;
 const uint8_t KEY_ARROW_LEFT  = 0x50;
@@ -122,51 +148,73 @@ KeyReport keyReport = {0};
 void setup() {
   Serial.begin(115200);
 
+  // Ждём подключения Serial (но не дольше 2 секунд)
+  unsigned long startTime = millis();
+  while (!Serial && (millis() - startTime < 2000)) {
+    delay(10);
+  }
+
+  Serial.println("\n╔═══════════════════════════════════════════════════════════╗");
+  Serial.println("║    МИКРОПАД 5K + ПОТЕНЦИОМЕТР (USB + BLUETOOTH)          ║");
+  Serial.println("╚═══════════════════════════════════════════════════════════╝\n");
+
   // ═══════════════════════════════════════════════════════════
-  // КРИТИЧЕСКИ ВАЖНО: Инициализация TinyUSB ПЕРЕД всем остальным
+  // ИНИЦИАЛИЗАЦИЯ USB HID
   // ═══════════════════════════════════════════════════════════
 
-  // Проверяем, инициализирован ли TinyUSB Device
+  Serial.println("🔌 Инициализация USB...");
+
   if (!TinyUSBDevice.isInitialized()) {
     TinyUSBDevice.begin(0);
   }
 
-  // Настраиваем USB HID
   usb_hid.setPollInterval(2);
   usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
   usb_hid.begin();
 
-  // ВАЖНО: Если устройство уже смонтировано, переподключаем для перезагрузки HID
   if (TinyUSBDevice.mounted()) {
     TinyUSBDevice.detach();
     delay(10);
     TinyUSBDevice.attach();
   }
 
-  // Ждём подключения Serial (но не дольше 3 секунд)
-  unsigned long startTime = millis();
-  while (!Serial && (millis() - startTime < 3000)) {
-    delay(10);
-  }
-
-  // Ждём монтирования USB устройства
-  Serial.println("\n╔═══════════════════════════════════════════════════════════╗");
-  Serial.println("║       МИКРОПАД НА 5 КНОПОК + ПОТЕНЦИОМЕТР ГРОМКОСТИ      ║");
-  Serial.println("╚═══════════════════════════════════════════════════════════╝\n");
-
-  Serial.println("Ожидание подключения USB...");
-  startTime = millis();
-  while (!TinyUSBDevice.mounted() && (millis() - startTime < 5000)) {
-    delay(100);
-    Serial.print(".");
-  }
-  Serial.println();
+  delay(500);
 
   if (TinyUSBDevice.mounted()) {
-    Serial.println("✓ USB устройство смонтировано!");
+    Serial.println("✓ USB устройство готово");
+    currentMode = MODE_USB;
+    wasUSBConnected = true;
   } else {
-    Serial.println("⚠ USB не смонтирован, но продолжаем...");
+    Serial.println("⚠ USB не подключен");
   }
+
+  // ═══════════════════════════════════════════════════════════
+  // ИНИЦИАЛИЗАЦИЯ BLUETOOTH
+  // ═══════════════════════════════════════════════════════════
+
+  Serial.println("\n📡 Инициализация Bluetooth...");
+
+  Bluefruit.begin();
+  Bluefruit.setTxPower(4);    // Мощность передатчика: -40, -20, -16, -12, -8, -4, 0, 4 dBm
+  Bluefruit.setName("Micropad-5K");
+
+  // Настройка Device Information Service
+  bledis.setManufacturer("Custom Hardware");
+  bledis.setModel("Micropad 5K");
+  bledis.begin();
+
+  // Настройка HID Service
+  blehid.begin();
+
+  // Настройка рекламы (advertising)
+  startAdv();
+
+  Serial.println("✓ Bluetooth готов к подключению");
+  Serial.println("  Имя устройства: Micropad-5K");
+
+  // ═══════════════════════════════════════════════════════════
+  // ИНИЦИАЛИЗАЦИЯ КНОПОК И ПОТЕНЦИОМЕТРА
+  // ═══════════════════════════════════════════════════════════
 
   Serial.println("\n┌───────────────────────────────────────────────────────────┐");
   Serial.println("│ Инициализация кнопок:                                     │");
@@ -217,9 +265,93 @@ void setup() {
   Serial.println("│");
   Serial.println("└───────────────────────────────────────────────────────────┘\n");
 
+  // Определяем текущий режим
+  updateConnectionMode();
+  printCurrentMode();
+
   Serial.println("🚀 Микропад готов к работе!\n");
 
   delay(100);
+}
+
+// ═══════════════════════════════════════════════════════════
+// BLUETOOTH ADVERTISING
+// ═══════════════════════════════════════════════════════════
+
+void startAdv(void) {
+  Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
+  Bluefruit.Advertising.addTxPower();
+  Bluefruit.Advertising.addAppearance(BLE_APPEARANCE_HID_KEYBOARD);
+
+  Bluefruit.Advertising.addService(blehid);
+
+  Bluefruit.Advertising.addName();
+
+  Bluefruit.Advertising.restartOnDisconnect(true);
+  Bluefruit.Advertising.setInterval(32, 244);    // in unit of 0.625 ms
+  Bluefruit.Advertising.setFastTimeout(30);      // number of seconds in fast mode
+  Bluefruit.Advertising.start(0);                // 0 = Don't stop advertising after n seconds
+}
+
+// ═══════════════════════════════════════════════════════════
+// ОПРЕДЕЛЕНИЕ РЕЖИМА ПОДКЛЮЧЕНИЯ
+// ═══════════════════════════════════════════════════════════
+
+void updateConnectionMode() {
+  bool usbMounted = TinyUSBDevice.mounted();
+
+  // USB подключен
+  if (usbMounted) {
+    if (currentMode != MODE_USB) {
+      currentMode = MODE_USB;
+      Serial.println("\n🔌 Переключение на USB режим");
+
+      // Отключаем Bluetooth для экономии энергии (опционально)
+      // Bluefruit.Advertising.stop();
+    }
+    wasUSBConnected = true;
+  }
+  // USB отключен, но Bluetooth подключен
+  else if (Bluefruit.connected()) {
+    if (currentMode != MODE_BLUETOOTH) {
+      currentMode = MODE_BLUETOOTH;
+      Serial.println("\n📡 Переключение на Bluetooth режим");
+    }
+    wasUSBConnected = false;
+  }
+  // Ничего не подключено, но раньше был USB
+  else if (wasUSBConnected && !usbMounted) {
+    currentMode = MODE_BLUETOOTH;
+    Serial.println("\n📡 USB отключен, ожидание Bluetooth соединения...");
+    wasUSBConnected = false;
+  }
+  // Полностью не подключено
+  else if (!Bluefruit.connected() && !usbMounted) {
+    currentMode = MODE_NONE;
+  }
+}
+
+void printCurrentMode() {
+  Serial.println("┌───────────────────────────────────────────────────────────┐");
+  Serial.print("│ Текущий режим: ");
+
+  switch(currentMode) {
+    case MODE_USB:
+      Serial.println("🔌 USB (проводное подключение)            │");
+      break;
+    case MODE_BLUETOOTH:
+      if (Bluefruit.connected()) {
+        Serial.println("📡 BLUETOOTH (беспроводное, подключено)   │");
+      } else {
+        Serial.println("📡 BLUETOOTH (ожидание подключения)       │");
+      }
+      break;
+    case MODE_NONE:
+      Serial.println("⚠️  НЕ ПОДКЛЮЧЕНО                          │");
+      break;
+  }
+
+  Serial.println("└───────────────────────────────────────────────────────────┘");
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -227,8 +359,19 @@ void setup() {
 // ═══════════════════════════════════════════════════════════
 
 void loop() {
-  // Проверяем, что USB смонтирован
-  if (!TinyUSBDevice.mounted()) {
+  // Периодически обновляем режим подключения
+  static unsigned long lastModeCheck = 0;
+  if (millis() - lastModeCheck > 1000) {
+    ConnectionMode oldMode = currentMode;
+    updateConnectionMode();
+    if (oldMode != currentMode) {
+      printCurrentMode();
+    }
+    lastModeCheck = millis();
+  }
+
+  // Проверяем наличие подключения
+  if (currentMode == MODE_NONE) {
     delay(100);
     return;
   }
@@ -286,16 +429,38 @@ void handleButtonPress(int buttonIndex) {
   uint8_t keycode = 0;
 
   switch(buttonIndex) {
-    case 0: keycode = KEY_ARROW_UP; Serial.println("↑");     break;
-    case 1: keycode = KEY_ARROW_DOWN; Serial.println("↓");   break;
-    case 2: keycode = KEY_ARROW_LEFT; Serial.println("←");   break;
-    case 3: keycode = KEY_ARROW_RIGHT; Serial.println("→");  break;
-    case 4: keycode = KEY_SPACEBAR; Serial.println("SPACE"); break;
+    case 0:
+      keycode = KEY_ARROW_UP;
+      Serial.println("↑");
+      break;
+    case 1:
+      keycode = KEY_ARROW_DOWN;
+      Serial.println("↓");
+      break;
+    case 2:
+      keycode = KEY_ARROW_LEFT;
+      Serial.println("←");
+      break;
+    case 3:
+      keycode = KEY_ARROW_RIGHT;
+      Serial.println("→");
+      break;
+    case 4:
+      keycode = KEY_SPACEBAR;
+      Serial.println("SPACE");
+      break;
   }
 
-  // Отправляем нажатие клавиши
-  keyReport.keys[0] = keycode;
-  usb_hid.sendReport(1, &keyReport, sizeof(keyReport));
+  // Отправляем в зависимости от режима
+  if (currentMode == MODE_USB) {
+    keyReport.keys[0] = keycode;
+    usb_hid.sendReport(1, &keyReport, sizeof(keyReport));
+  }
+  else if (currentMode == MODE_BLUETOOTH && Bluefruit.connected()) {
+    // Используем keyboardReport с массивом клавиш
+    uint8_t keycodes[6] = {keycode, 0, 0, 0, 0, 0};
+    blehid.keyboardReport(0, keycodes); // 0 = no modifiers
+  }
 }
 
 void handleButtonRelease(int buttonIndex) {
@@ -305,9 +470,15 @@ void handleButtonRelease(int buttonIndex) {
   Serial.print(buttonNames[buttonIndex]);
   Serial.println(" - отпущена");
 
-  // Отправляем отпускание клавиши
-  keyReport.keys[0] = 0;
-  usb_hid.sendReport(1, &keyReport, sizeof(keyReport));
+  // Отправляем отпускание в зависимости от режима
+  if (currentMode == MODE_USB) {
+    keyReport.keys[0] = 0;
+    usb_hid.sendReport(1, &keyReport, sizeof(keyReport));
+  }
+  else if (currentMode == MODE_BLUETOOTH && Bluefruit.connected()) {
+    uint8_t keycodes[6] = {0, 0, 0, 0, 0, 0};
+    blehid.keyboardReport(0, keycodes); // Отпускаем все клавиши
+  }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -401,21 +572,31 @@ void sendPendingVolumeCommands() {
 }
 
 void sendVolumeUp() {
-  uint16_t volumeCmd = VOLUME_UP;
-  usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
-  delay(5);
-
-  // Отправляем "отпускание"
-  volumeCmd = 0;
-  usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
+  if (currentMode == MODE_USB) {
+    uint16_t volumeCmd = VOLUME_UP;
+    usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
+    delay(5);
+    volumeCmd = 0;
+    usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
+  }
+  else if (currentMode == MODE_BLUETOOTH && Bluefruit.connected()) {
+    blehid.consumerKeyPress(HID_USAGE_CONSUMER_VOLUME_INCREMENT);
+    delay(5);
+    blehid.consumerKeyRelease();
+  }
 }
 
 void sendVolumeDown() {
-  uint16_t volumeCmd = VOLUME_DOWN;
-  usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
-  delay(5);
-
-  // Отправляем "отпускание"
-  volumeCmd = 0;
-  usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
+  if (currentMode == MODE_USB) {
+    uint16_t volumeCmd = VOLUME_DOWN;
+    usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
+    delay(5);
+    volumeCmd = 0;
+    usb_hid.sendReport(2, &volumeCmd, sizeof(volumeCmd));
+  }
+  else if (currentMode == MODE_BLUETOOTH && Bluefruit.connected()) {
+    blehid.consumerKeyPress(HID_USAGE_CONSUMER_VOLUME_DECREMENT);
+    delay(5);
+    blehid.consumerKeyRelease();
+  }
 }
