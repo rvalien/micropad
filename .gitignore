@@ -1,0 +1,16 @@
+# Секреты (в проекте не используются, но на случай добавления)
+credentials.h
+
+# Сборка Arduino
+build/
+*.hex
+*.elf
+*.bin
+*.uf2
+*.zip
+
+# IDE / ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
