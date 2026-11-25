@@ -12,19 +12,19 @@
  *                само «будящее» нажатие не передаётся)
  *  - Батарея:    уровень отдаётся хосту через BLE Battery Service
  *
- * ПОДКЛЮЧЕНИЕ (номера — для pinMode(), см. docs/PINOUT.md):
- *  ┌────────────┬───────────┬──────────┬───────────────┐
- *  │ Функция    │ pinMode() │ Arduino  │ Пин на плате  │
- *  ├────────────┼───────────┼──────────┼───────────────┤
- *  │ ВВЕРХ ↑    │ 3         │ D18      │ 115 (P1.15)   │
- *  │ ВНИЗ ↓     │ 29        │ D2       │ 017 (P0.17)   │
- *  │ ВЛЕВО ←    │ 18        │ D19      │ 002 (P0.02)   │
- *  │ ВПРАВО →   │ 21        │ D21      │ 031 (P0.31)   │
- *  │ ПАУЗА      │ 23        │ D7       │ 011 (P0.11)   │
- *  │ ГРОМКОСТЬ  │ 20        │ D20      │ 029 (P0.29)   │
- *  └────────────┴───────────┴──────────┴───────────────┘
+ * ПОДКЛЮЧЕНИЕ (номера — для pinMode(), проверено pin_scan, см. docs/PINOUT.md):
+ *  ┌────────────┬───────────────┬────────┬───────────┐
+ *  │ Функция    │ Пин на плате  │ Порт   │ pinMode() │
+ *  ├────────────┼───────────────┼────────┼───────────┤
+ *  │ ВВЕРХ ↑    │ 115           │ P1.15  │ 3         │
+ *  │ ВНИЗ ↓     │ 017           │ P0.17  │ 29        │
+ *  │ ВЛЕВО ←    │ 002           │ P0.02  │ 18        │
+ *  │ ВПРАВО →   │ 031           │ P0.31  │ 21        │
+ *  │ ПАУЗА      │ 011           │ P0.11  │ 23        │
+ *  │ ГРОМКОСТЬ  │ 029 (AIN5)    │ P0.29  │ 20        │
+ *  └────────────┴───────────────┴────────┴───────────┘
  *  Кнопки: между пином и GND (INPUT_PULLUP).
- *  Потенциометр 10 кОм: крайние выводы на VCC и GND, средний — на D20.
+ *  Потенциометр 10 кОм: крайние выводы на VCC и GND, средний — на пин 029.
  *
  * ADC:
  *  Для потенциометра используется ADC по умолчанию (10 бит, референс 3,6 В).
@@ -77,22 +77,18 @@ typedef struct {
 // РАСПИНОВКА (номера для pinMode(), проверено, см. docs/PINOUT.md)
 // ═══════════════════════════════════════════════════════════
 
-const int PIN_UP     = 3;   // D18, P1.15
-const int PIN_DOWN   = 29;  // D2,  P0.17
-const int PIN_LEFT   = 18;  // D19, P0.02
-const int PIN_RIGHT  = 21;  // D21, P0.31
-const int PIN_PAUSE  = 23;  // D7,  P0.11
-const int PIN_VOLUME = 20;  // D20, P0.29 (AIN5)
+const int PIN_UP     = 3;   // 115, P1.15
+const int PIN_DOWN   = 29;  // 017, P0.17
+const int PIN_LEFT   = 18;  // 002, P0.02
+const int PIN_RIGHT  = 21;  // 031, P0.31
+const int PIN_PAUSE  = 23;  // 011, P0.11
+const int PIN_VOLUME = 20;  // 029, P0.29 (AIN5)
 
-// Пин измерения батареи.
-// ВНИМАНИЕ: номер 31 не подтверждён на железе. Если в вашем варианте ядра
-// определён макрос PIN_VBAT — используется он. По документации nice!nano
-// батарея измеряется на P0.04 (AIN2) — проверьте на своей плате.
-#ifdef PIN_VBAT
-const int PIN_BATTERY = PIN_VBAT;
-#else
-const int PIN_BATTERY = 31;
-#endif
+// Пин измерения батареи: P0.04 (AIN2), внутренний, на колодки не выведен.
+// В используемом ядре это pinMode(14) (проверено pin_scan: 14 = P0.04).
+// Макрос ядра PIN_VBAT НЕ используется: в раскладке Feather он указывает
+// на P0.29, то есть на пин потенциометра.
+const int PIN_BATTERY = 14;
 
 // HID-коды клавиш
 const uint8_t KEY_ARROW_UP    = 0x52;
@@ -126,7 +122,11 @@ unsigned long lastActivityTime = 0;
 // БАТАРЕЯ
 // ═══════════════════════════════════════════════════════════
 
-// ADC батареи: 12 бит, референс 3,0 В → 3000 / 4096 мВ на шаг; делитель 2:1
+// ADC батареи: 12 бит, референс 3,0 В → 3000 / 4096 мВ на шаг.
+// VBAT_DIVIDER — коэффициент делителя. ТРЕБУЕТ КАЛИБРОВКИ по мультиметру:
+//   VBAT_DIVIDER = (напряжение батареи по мультиметру, В) / (В, которое показывает
+//   прошивка при VBAT_DIVIDER = 1.0)
+// Известные варианты: 2.0 (делитель 1:1), ≈1.403 (клоны с делителем 2 МОм / 806 кОм).
 const float VBAT_MV_PER_LSB = 3000.0F / 4096.0F;
 const float VBAT_DIVIDER    = 2.0F;
 
@@ -418,25 +418,28 @@ void updateBatteryLevel() {
   batteryVoltage = mv / 1000.0F;
 
   if (mv < VBAT_NO_BATTERY_MV) {
-    return;  // батарея не подключена — не портим значение в BLE
+    Serial.print("Батарея не обнаружена (на АЦП ");
+    Serial.print(batteryVoltage, 2);
+    Serial.println(" В)");
+    return;  // не портим значение в BLE
   }
 
   int percent = (int)((mv - VBAT_EMPTY) / (VBAT_FULL - VBAT_EMPTY) * 100.0F);
   percent = constrain(percent, 0, 100);
 
-  if (percent != batteryLevel) {
-    batteryLevel = percent;
-    blebas.write(batteryLevel);
+  bool changed = (percent != batteryLevel);
+  batteryLevel = percent;
+  if (changed) blebas.write(batteryLevel);
 
-    Serial.print("Батарея: ");
-    Serial.print(batteryVoltage, 2);
-    Serial.print(" В (");
-    Serial.print(batteryLevel);
-    Serial.println("%)");
+  // Печатаем при каждом замере — это нужно для калибровки VBAT_DIVIDER
+  Serial.print("Батарея: ");
+  Serial.print(batteryVoltage, 2);
+  Serial.print(" В (");
+  Serial.print(batteryLevel);
+  Serial.println("%)");
 
-    if (batteryLevel <= 10) {
-      Serial.println("ВНИМАНИЕ: низкий заряд батареи!");
-    }
+  if (changed && batteryLevel <= 10) {
+    Serial.println("ВНИМАНИЕ: низкий заряд батареи!");
   }
 }
 
